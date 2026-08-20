@@ -1,0 +1,9 @@
+output/
+.azure/*
+!.azure/deployment-plan.md
+*.log
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+/test-scripts/

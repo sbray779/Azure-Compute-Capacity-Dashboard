@@ -1,0 +1,22 @@
+name: azure-compute-capacity-dashboard
+metadata:
+  template: azure-compute-capacity-dashboard@1.0.0
+
+infra:
+  provider: bicep
+  path: infra
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/Assign-ManagementGroupReader.ps1
+    posix:
+      shell: sh
+      run: ./scripts/assign-management-group-reader.sh
+
+services:
+  collector:
+    project: ./src/function
+    language: python
+    host: function

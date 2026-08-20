@@ -1,0 +1,5 @@
+azure-functions==2.2.0
+azure-identity==1.25.3
+azure-mgmt-resourcegraph==8.0.1
+azure-monitor-ingestion==1.1.0
+requests==2.32.5

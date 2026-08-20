@@ -1,0 +1,20 @@
+resources
+| where type =~ 'microsoft.compute/virtualmachines'
+| where isempty(properties.virtualMachineScaleSet.id)
+| extend computeSku = tostring(properties.hardwareProfile.vmSize)
+| where isnotempty(computeSku)
+| project subscriptionId, resourceGroup, location = tolower(location),
+          computeSku, deployedInstances = 1, resourceKind = 'VirtualMachine'
+| union (
+    resources
+    | where type =~ 'microsoft.compute/virtualmachinescalesets'
+    | extend computeSku = tostring(sku.name),
+             deployedInstances = tolong(sku.capacity)
+    | where isnotempty(computeSku)
+    | project subscriptionId, resourceGroup, location = tolower(location),
+              computeSku, deployedInstances, resourceKind = 'VirtualMachineScaleSet'
+)
+| summarize deployedInstances = sum(deployedInstances),
+            resourceCount = count()
+    by subscriptionId, location, computeSku, resourceKind
+| order by subscriptionId asc, computeSku asc, location asc
