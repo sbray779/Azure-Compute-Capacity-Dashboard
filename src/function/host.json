@@ -7,6 +7,22 @@
         "isEnabled": true
       },
       "enableLiveMetricsFilters": true
+    },
+    "logLevel": {
+      "DurableTask.AzureManagedBackend": "Information"
+    }
+  },
+  "extensions": {
+    "durableTask": {
+      "hubName": "%TASKHUB_NAME%",
+      "storageProvider": {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+      },
+      "tracing": {
+        "distributedTracingEnabled": true,
+        "version": "None"
+      }
     }
   },
   "extensionBundle": {

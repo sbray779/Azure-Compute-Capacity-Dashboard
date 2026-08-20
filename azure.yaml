@@ -7,6 +7,13 @@ infra:
   path: infra
 
 hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/Register-ResourceProviders.ps1
+    posix:
+      shell: sh
+      run: ./scripts/register-resource-providers.sh
   postprovision:
     windows:
       shell: pwsh

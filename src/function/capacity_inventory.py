@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
-import uuid
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +14,7 @@ from azure.identity import DefaultAzureCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest, QueryRequestOptions
 from azure.monitor.ingestion import LogsIngestionClient
+from azure.storage.blob import BlobServiceClient, ContainerClient
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -326,21 +329,13 @@ def build_detail_rows(
                 subscription["name"],
                 region,
             )
-            try:
-                for sku in sku_fetcher(subscription_id, region):
-                    sku_name = sku.get("name")
-                    if (
-                        sku_name in referenced_skus
-                        and sku_name not in sku_by_name
-                    ):
-                        sku_by_name[sku_name] = sku
-            except RuntimeError as error:
-                logging.warning(
-                    "Unable to read SKU metadata for %s / %s: %s",
-                    subscription["name"],
-                    region,
-                    error,
-                )
+            for sku in sku_fetcher(subscription_id, region):
+                sku_name = sku.get("name")
+                if (
+                    sku_name in referenced_skus
+                    and sku_name not in sku_by_name
+                ):
+                    sku_by_name[sku_name] = sku
 
             if region in regions:
                 logging.info(
@@ -348,19 +343,10 @@ def build_detail_rows(
                     subscription["name"],
                     region,
                 )
-                try:
-                    quota_by_region[region] = quota_fetcher(
-                        subscription_id,
-                        region,
-                    )
-                except RuntimeError as error:
-                    logging.warning(
-                        "Unable to read quota for %s / %s: %s",
-                        subscription["name"],
-                        region,
-                        error,
-                    )
-                    quota_by_region[region] = ([], [])
+                quota_by_region[region] = quota_fetcher(
+                    subscription_id,
+                    region,
+                )
 
         for region in regions:
             quotas, usages = quota_by_region[region]
@@ -454,13 +440,35 @@ def build_detail_rows(
     return detail
 
 
-def ingestion_records(detail: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    collection_id = str(uuid.uuid4())
+def record_id(
+    collection_id: str,
+    subscription_id: str,
+    region: str,
+    compute_sku: str,
+) -> str:
+    value = "|".join(
+        (collection_id, subscription_id, region, compute_sku)
+    ).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def ingestion_records(
+    detail: Iterable[dict[str, Any]],
+    collection_id: str,
+    partition_id: str,
+) -> list[dict[str, Any]]:
     generated_at = datetime.now(timezone.utc).isoformat()
     return [
         {
             "TimeGenerated": generated_at,
             "CollectionId_s": collection_id,
+            "PartitionId_s": partition_id,
+            "RecordId_s": record_id(
+                collection_id,
+                row["SubscriptionId"],
+                row["Region"],
+                row["ComputeSku"],
+            ),
             "SubscriptionId_s": row["SubscriptionId"],
             "SubscriptionName_s": row["SubscriptionName"],
             "Region_s": row["Region"],
@@ -502,15 +510,28 @@ def required_environment(name: str) -> str:
     return value.strip()
 
 
-def run_from_environment() -> int:
+def runtime_credential() -> DefaultAzureCredential:
     client_id = required_environment("AZURE_CLIENT_ID")
+    return DefaultAzureCredential(managed_identity_client_id=client_id)
+
+
+def work_container_client(credential: Any) -> ContainerClient:
+    service = BlobServiceClient(
+        account_url=required_environment("AZURE_STORAGE_BLOB_ENDPOINT"),
+        credential=credential,
+    )
+    return service.get_container_client(
+        required_environment("AZURE_CAPACITY_WORK_CONTAINER")
+    )
+
+
+def discover_partitions_from_environment(
+    collection_id: str,
+) -> dict[str, Any]:
+    credential = runtime_credential()
     management_group_id = required_environment("AZURE_MANAGEMENT_GROUP_ID")
-    ingestion_endpoint = required_environment("AZURE_DATA_COLLECTION_ENDPOINT")
-    rule_id = required_environment("AZURE_DATA_COLLECTION_RULE_ID")
-    stream_name = required_environment("AZURE_DATA_COLLECTION_STREAM")
-    credential = DefaultAzureCredential(managed_identity_client_id=client_id)
     graph_client = ResourceGraphClient(credential)
-    arm_client = ArmClient(credential)
+    container = work_container_client(credential)
 
     subscriptions = query_resource_graph(
         graph_client,
@@ -526,59 +547,146 @@ def run_from_environment() -> int:
         {"id": str(row["id"]), "name": str(row["name"])}
         for row in subscriptions
     ]
-    deployments: list[dict[str, Any]] = []
-    for subscription in normalized_subscriptions:
-        logging.info("Querying deployed compute in %s.", subscription["name"])
-        deployments.extend(
-            query_resource_graph(
-                graph_client,
-                DEPLOYED_COMPUTE_QUERY,
-                subscriptions=[subscription["id"]],
-            )
-        )
-
-    if not deployments:
-        logging.warning(
-            "No deployed virtual machines or virtual machine scale sets were found."
-        )
-        return 0
-
+    deployments = query_resource_graph(
+        graph_client,
+        DEPLOYED_COMPUTE_QUERY,
+        management_groups=[management_group_id],
+    )
     reservations = query_resource_graph(
         graph_client,
         CAPACITY_RESERVATION_QUERY,
-        subscriptions=[
-            subscription["id"] for subscription in normalized_subscriptions
-        ],
+        management_groups=[management_group_id],
     )
 
-    deployed_subscription_ids = {
-        str(row["subscriptionId"]) for row in deployments
+    deployments_by_subscription: dict[str, list[dict[str, Any]]] = defaultdict(
+        list
+    )
+    reservations_by_subscription: dict[str, list[dict[str, Any]]] = defaultdict(
+        list
+    )
+    for row in deployments:
+        deployments_by_subscription[str(row.get("subscriptionId"))].append(row)
+    for row in reservations:
+        reservations_by_subscription[str(row.get("subscriptionId"))].append(
+            row
+        )
+
+    partitions: list[dict[str, str]] = []
+    for subscription in normalized_subscriptions:
+        subscription_id = subscription["id"]
+        partition_deployments = deployments_by_subscription[subscription_id]
+        if not partition_deployments:
+            continue
+
+        payload = {
+            "collectionId": collection_id,
+            "partitionId": subscription_id,
+            "subscription": subscription,
+            "deployments": partition_deployments,
+            "reservations": reservations_by_subscription[subscription_id],
+        }
+        blob_name = f"{collection_id}/{subscription_id}.json"
+        container.upload_blob(
+            name=blob_name,
+            data=json.dumps(payload, separators=(",", ":")),
+            overwrite=True,
+        )
+        partitions.append(
+            {
+                "collectionId": collection_id,
+                "partitionId": subscription_id,
+                "blobName": blob_name,
+            }
+        )
+
+    return {
+        "collectionId": collection_id,
+        "subscriptionCount": len(normalized_subscriptions),
+        "partitions": partitions,
     }
+
+
+def collect_partition_from_environment(
+    work_item: dict[str, str],
+) -> dict[str, Any]:
+    credential = runtime_credential()
+    container = work_container_client(credential)
+    payload = json.loads(
+        container.download_blob(work_item["blobName"]).readall()
+    )
+    arm_client = ArmClient(credential)
     regions = sorted(
         {
-            region
-            for subscription_id in deployed_subscription_ids
-            for region in arm_client.list_compute_regions(subscription_id)
+            str(row["location"]).lower()
+            for row in payload["deployments"] + payload["reservations"]
         }
     )
-    if not regions:
-        raise RuntimeError(
-            "No physical Azure regions supporting virtual machines were found."
-        )
-    logging.info("Collecting capacity for %d Azure regions.", len(regions))
-
     detail = build_detail_rows(
-        normalized_subscriptions,
-        deployments,
-        reservations,
+        [payload["subscription"]],
+        payload["deployments"],
+        payload["reservations"],
         regions,
         arm_client.list_compute_skus,
         arm_client.list_quota,
     )
-    records = ingestion_records(detail)
+    records = ingestion_records(
+        detail,
+        work_item["collectionId"],
+        work_item["partitionId"],
+    )
     ingestion_client = LogsIngestionClient(
-        endpoint=ingestion_endpoint,
+        endpoint=required_environment("AZURE_DATA_COLLECTION_ENDPOINT"),
         credential=credential,
     )
-    publish_records(ingestion_client, rule_id, stream_name, records)
-    return len(records)
+    publish_records(
+        ingestion_client,
+        required_environment("AZURE_DATA_COLLECTION_RULE_ID"),
+        required_environment("AZURE_DATA_COLLECTION_STREAM"),
+        records,
+    )
+    return {
+        "partitionId": work_item["partitionId"],
+        "recordCount": len(records),
+        "regionCount": len(regions),
+    }
+
+
+def complete_collection_from_environment(
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    credential = runtime_credential()
+    completed_at = datetime.now(timezone.utc).isoformat()
+    run_record = {
+        "TimeGenerated": completed_at,
+        "CollectionId_s": summary["collectionId"],
+        "Status_s": "Completed",
+        "SubscriptionCount_d": summary["subscriptionCount"],
+        "PartitionCount_d": summary["partitionCount"],
+        "RecordCount_d": summary["recordCount"],
+        "StartedAt_t": summary["startedAt"],
+        "CompletedAt_t": completed_at,
+    }
+    ingestion_client = LogsIngestionClient(
+        endpoint=required_environment("AZURE_DATA_COLLECTION_ENDPOINT"),
+        credential=credential,
+    )
+    publish_records(
+        ingestion_client,
+        required_environment("AZURE_DATA_COLLECTION_RULE_ID"),
+        required_environment("AZURE_DATA_COLLECTION_RUN_STREAM"),
+        [run_record],
+    )
+
+    container = work_container_client(credential)
+    try:
+        for blob in container.list_blobs(
+            name_starts_with=f"{summary['collectionId']}/"
+        ):
+            container.delete_blob(blob.name)
+    except Exception:
+        logging.exception(
+            "Completed collection %s, but failed to clean its staging blobs.",
+            summary["collectionId"],
+        )
+
+    return run_record

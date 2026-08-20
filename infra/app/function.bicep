@@ -15,6 +15,7 @@ var baseAppSettings = {
   AzureWebJobsStorage__clientId: identityClientId
   AzureWebJobsStorage__blobServiceUri: storage.properties.primaryEndpoints.blob
   AzureWebJobsStorage__queueServiceUri: storage.properties.primaryEndpoints.queue
+  AzureWebJobsStorage__tableServiceUri: storage.properties.primaryEndpoints.table
   APPLICATIONINSIGHTS_AUTHENTICATION_STRING: applicationInsightsIdentity
   APPLICATIONINSIGHTS_CONNECTION_STRING: applicationInsights.properties.ConnectionString
 }
@@ -56,7 +57,7 @@ module functionApp 'br/public:avm/res/web/site:0.15.1' = {
       }
       scaleAndConcurrency: {
         instanceMemoryMB: 2048
-        maximumInstanceCount: 1
+        maximumInstanceCount: 10
       }
       runtime: {
         name: 'python'

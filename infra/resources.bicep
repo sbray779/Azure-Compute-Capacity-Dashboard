@@ -1,15 +1,20 @@
 @minLength(1)
 param environmentName string
 param location string
+param durableTaskSchedulerLocation string
 param managementGroupId string
 param principalId string
 
 var suffix = toLower(uniqueString(subscription().id, resourceGroup().id, environmentName))
 var prefix = 'capacity-${environmentName}'
 var streamName = 'Custom-ComputeCapacity_CL'
+var runStreamName = 'Custom-ComputeCapacityRuns_CL'
 var functionName = 'func-${prefix}-${suffix}'
 var functionStorageName = 'st${suffix}'
 var deploymentContainerName = 'app-package-${take(suffix, 12)}'
+var workContainerName = 'capacity-work'
+var schedulerName = 'dts-${prefix}-${suffix}'
+var taskHubName = 'capacity'
 var metricsPublisherRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '3913510d-42f4-4e42-8a64-420c390055eb'
@@ -22,6 +27,10 @@ var storageQueueDataContributorRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
 )
+var storageTableDataContributorRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+)
 var tableColumns = [
   {
     name: 'TimeGenerated'
@@ -29,6 +38,14 @@ var tableColumns = [
   }
   {
     name: 'CollectionId_s'
+    type: 'string'
+  }
+  {
+    name: 'PartitionId_s'
+    type: 'string'
+  }
+  {
+    name: 'RecordId_s'
     type: 'string'
   }
   {
@@ -92,6 +109,40 @@ var tableColumns = [
     type: 'real'
   }
 ]
+var runTableColumns = [
+  {
+    name: 'TimeGenerated'
+    type: 'datetime'
+  }
+  {
+    name: 'CollectionId_s'
+    type: 'string'
+  }
+  {
+    name: 'Status_s'
+    type: 'string'
+  }
+  {
+    name: 'SubscriptionCount_d'
+    type: 'real'
+  }
+  {
+    name: 'PartitionCount_d'
+    type: 'real'
+  }
+  {
+    name: 'RecordCount_d'
+    type: 'real'
+  }
+  {
+    name: 'StartedAt_t'
+    type: 'datetime'
+  }
+  {
+    name: 'CompletedAt_t'
+    type: 'datetime'
+  }
+]
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${prefix}-logs'
@@ -105,6 +156,20 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
     retentionInDays: 30
     sku: {
       name: 'PerGB2018'
+    }
+  }
+}
+
+resource capacityRunsTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01' = {
+  parent: workspace
+  name: 'ComputeCapacityRuns_CL'
+  properties: {
+    plan: 'Analytics'
+    retentionInDays: 30
+    totalRetentionInDays: 30
+    schema: {
+      name: 'ComputeCapacityRuns_CL'
+      columns: runTableColumns
     }
   }
 }
@@ -155,6 +220,9 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' 
       '${streamName}': {
         columns: tableColumns
       }
+      '${runStreamName}': {
+        columns: runTableColumns
+      }
     }
     destinations: {
       logAnalytics: [
@@ -175,10 +243,21 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' 
         transformKql: 'source'
         outputStream: streamName
       }
+      {
+        streams: [
+          runStreamName
+        ]
+        destinations: [
+          'capacityWorkspace'
+        ]
+        transformKql: 'source'
+        outputStream: runStreamName
+      }
     ]
   }
   dependsOn: [
     capacityTable
+    capacityRunsTable
   ]
 }
 
@@ -187,11 +266,42 @@ resource collectorIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@202
   location: location
 }
 
+module durableTaskScheduler './app/dts.bicep' = {
+  name: 'durableTaskScheduler'
+  params: {
+    name: schedulerName
+    taskHubName: taskHubName
+    location: durableTaskSchedulerLocation
+    tags: {
+      'azd-env-name': environmentName
+      workload: 'azure-compute-capacity'
+    }
+  }
+}
+
+module durableTaskAccess './app/dts-access.bicep' = {
+  name: 'durableTaskAccess'
+  params: {
+    schedulerName: durableTaskScheduler.outputs.name
+    principalId: collectorIdentity.properties.principalId
+  }
+}
+
+module durableTaskDashboardAccess './app/dts-access.bicep' = if (!empty(principalId)) {
+  name: 'durableTaskDashboardAccess'
+  params: {
+    schedulerName: durableTaskScheduler.outputs.name
+    principalId: principalId
+    principalType: 'User'
+  }
+}
+
 module functionStorage 'br/public:avm/res/storage/storage-account:0.8.3' = {
   name: 'functionStorage'
   params: {
     name: functionStorageName
     location: location
+    skuName: 'Standard_LRS'
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false
     dnsEndpointType: 'Standard'
@@ -204,6 +314,9 @@ module functionStorage 'br/public:avm/res/storage/storage-account:0.8.3' = {
       containers: [
         {
           name: deploymentContainerName
+        }
+        {
+          name: workContainerName
         }
       ]
     }
@@ -240,6 +353,19 @@ resource collectorStorageQueueContributor 'Microsoft.Authorization/roleAssignmen
     principalId: collectorIdentity.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: storageQueueDataContributorRoleId
+  }
+  dependsOn: [
+    functionStorage
+  ]
+}
+
+resource collectorStorageTableContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionStorageAccount.id, collectorIdentity.id, storageTableDataContributorRoleId)
+  scope: functionStorageAccount
+  properties: {
+    principalId: collectorIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: storageTableDataContributorRoleId
   }
   dependsOn: [
     functionStorage
@@ -313,6 +439,11 @@ module collectorFunction './app/function.bicep' = {
       AZURE_DATA_COLLECTION_ENDPOINT: dataCollectionEndpoint.properties.logsIngestion.endpoint
       AZURE_DATA_COLLECTION_RULE_ID: dataCollectionRule.properties.immutableId
       AZURE_DATA_COLLECTION_STREAM: streamName
+      AZURE_DATA_COLLECTION_RUN_STREAM: runStreamName
+      AZURE_STORAGE_BLOB_ENDPOINT: functionStorageAccount.properties.primaryEndpoints.blob
+      AZURE_CAPACITY_WORK_CONTAINER: workContainerName
+      DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=${durableTaskScheduler.outputs.endpoint};Authentication=ManagedIdentity;ClientID=${collectorIdentity.properties.clientId}'
+      TASKHUB_NAME: durableTaskScheduler.outputs.taskHubName
     }
     tags: {
       'azd-env-name': environmentName
@@ -322,7 +453,10 @@ module collectorFunction './app/function.bicep' = {
   dependsOn: [
     collectorStorageBlobOwner
     collectorStorageQueueContributor
+    collectorStorageTableContributor
     dcrMetricsPublisher
+    durableTaskAccess
+    durableTaskDashboardAccess
     insightsMetricsPublisher
   ]
 }
@@ -347,4 +481,5 @@ resource workbook 'Microsoft.Insights/workbooks@2023-06-01' = {
 output functionName string = collectorFunction.outputs.functionName
 output collectorIdentityId string = collectorIdentity.id
 output collectorPrincipalId string = collectorIdentity.properties.principalId
+output durableTaskSchedulerName string = durableTaskScheduler.outputs.name
 output workbookId string = workbook.id

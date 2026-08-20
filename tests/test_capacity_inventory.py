@@ -1,13 +1,18 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import capacity_inventory
+import function_app
 from capacity_inventory import (
     ArmClient,
     build_detail_rows,
+    discover_partitions_from_environment,
+    ingestion_records,
     publish_records,
     query_resource_graph,
     quota_value,
+    record_id,
 )
 
 
@@ -169,29 +174,159 @@ def test_publish_records_batches_at_500():
     assert all(call["stream_name"] == "stream" for call in client.calls)
 
 
-def test_run_returns_zero_when_scope_has_no_deployed_compute():
+def test_ingestion_records_have_deterministic_ids():
+    detail = [
+        {
+            "SubscriptionId": "sub-1",
+            "SubscriptionName": "One",
+            "Region": "eastus",
+            "ComputeSku": "Standard_D2s_v3",
+            "VmFamily": "standardDSv3Family",
+            "ResourceKind": "VirtualMachine",
+            "ResourceCount": 1,
+            "DeployedInstances": 1,
+            "VCpusPerInstance": 2,
+            "DeployedVCpus": 2,
+            "ReservedInstances": 0,
+            "ReservedVCpus": 0,
+            "QuotaLimitVCpus": 20,
+            "QuotaUsageVCpus": 2,
+            "QuotaAvailableVCpus": 18,
+        }
+    ]
+
+    first = ingestion_records(detail, "collection", "sub-1")
+    second = ingestion_records(detail, "collection", "sub-1")
+
+    assert first[0]["RecordId_s"] == second[0]["RecordId_s"]
+    assert first[0]["RecordId_s"] == record_id(
+        "collection",
+        "sub-1",
+        "eastus",
+        "Standard_D2s_v3",
+    )
+    assert first[0]["PartitionId_s"] == "sub-1"
+
+
+def test_discovery_stages_one_partition_per_deployed_subscription():
     environment = {
         "AZURE_CLIENT_ID": "client",
         "AZURE_MANAGEMENT_GROUP_ID": "management-group",
-        "AZURE_DATA_COLLECTION_ENDPOINT": "https://example.test",
-        "AZURE_DATA_COLLECTION_RULE_ID": "rule",
-        "AZURE_DATA_COLLECTION_STREAM": "stream",
-        "AZURE_CAPACITY_REGIONS": "eastus",
+        "AZURE_STORAGE_BLOB_ENDPOINT": "https://storage.example.test",
+        "AZURE_CAPACITY_WORK_CONTAINER": "work",
     }
     subscriptions = [
         {"id": "sub-1", "name": "One"},
         {"id": "sub-2", "name": "Two"},
     ]
+    deployments = [
+        {
+            "subscriptionId": "sub-1",
+            "location": "eastus",
+            "computeSku": "Standard_D2s_v3",
+        }
+    ]
+
+    class FakeContainer:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_blob(self, **kwargs):
+            self.uploads.append(kwargs)
+
+    container = FakeContainer()
 
     with (
         patch.dict("os.environ", environment, clear=True),
         patch.object(capacity_inventory, "DefaultAzureCredential"),
         patch.object(capacity_inventory, "ResourceGraphClient"),
-        patch.object(capacity_inventory, "ArmClient"),
+        patch.object(
+            capacity_inventory,
+            "work_container_client",
+            return_value=container,
+        ),
         patch.object(
             capacity_inventory,
             "query_resource_graph",
-            side_effect=[subscriptions, [], []],
-        ),
+            side_effect=[subscriptions, deployments, []],
+        ) as query,
     ):
-        assert capacity_inventory.run_from_environment() == 0
+        discovery = discover_partitions_from_environment("collection")
+
+    assert discovery["subscriptionCount"] == 2
+    assert discovery["partitions"] == [
+        {
+            "collectionId": "collection",
+            "partitionId": "sub-1",
+            "blobName": "collection/sub-1.json",
+        }
+    ]
+    assert len(container.uploads) == 1
+    payload = json.loads(container.uploads[0]["data"])
+    assert payload["subscription"]["name"] == "One"
+    assert query.call_args_list[1].kwargs == {
+        "management_groups": ["management-group"]
+    }
+    assert query.call_args_list[2].kwargs == {
+        "management_groups": ["management-group"]
+    }
+
+
+def test_orchestrator_limits_each_fan_out_batch_to_ten():
+    partitions = [
+        {
+            "collectionId": "collection",
+            "partitionId": f"sub-{index}",
+            "blobName": f"collection/sub-{index}.json",
+        }
+        for index in range(21)
+    ]
+
+    class FakeContext:
+        def __init__(self):
+            self.batch_sizes = []
+            self.statuses = []
+
+        def get_input(self):
+            return {"startedAt": "2026-08-20T00:00:00+00:00"}
+
+        def new_uuid(self):
+            return "collection"
+
+        def call_activity_with_retry(self, name, retry, value):
+            return {"name": name, "retry": retry, "value": value}
+
+        def task_all(self, tasks):
+            self.batch_sizes.append(len(tasks))
+            return tasks
+
+        def set_custom_status(self, status):
+            self.statuses.append(status)
+
+    context = FakeContext()
+    orchestration = function_app.orchestrate_capacity(context)
+    discovery_task = next(orchestration)
+    assert discovery_task["name"] == "discover_capacity_partitions"
+
+    first_batch = orchestration.send(
+        {
+            "subscriptionCount": 25,
+            "partitions": partitions,
+        }
+    )
+    assert len(first_batch) == 10
+
+    second_batch = orchestration.send(
+        [{"recordCount": 1} for _ in range(10)]
+    )
+    assert len(second_batch) == 10
+
+    final_batch = orchestration.send(
+        [{"recordCount": 1} for _ in range(10)]
+    )
+    assert len(final_batch) == 1
+
+    completion = orchestration.send([{"recordCount": 1}])
+    assert completion["name"] == "complete_capacity_collection"
+    assert completion["value"]["recordCount"] == 21
+    assert context.batch_sizes == [10, 10, 1]
