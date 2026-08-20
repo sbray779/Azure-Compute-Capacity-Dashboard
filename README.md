@@ -121,6 +121,39 @@ Azure Functions NCRONTAB uses six fields, so this runs once daily at midnight
 UTC. `run_on_startup` is disabled to avoid inventory runs during deployments or
 host restarts.
 
+## Disable or re-enable collection
+
+Disable only the scheduled collector while leaving the Function App and
+dashboard infrastructure deployed:
+
+```powershell
+$functionName = azd env get-value AZURE_FUNCTION_NAME
+$resourceGroup = azd env get-value AZURE_RESOURCE_GROUP
+
+az functionapp config appsettings set `
+  --resource-group $resourceGroup `
+  --name $functionName `
+  --settings AzureWebJobs.collect_compute_capacity.Disabled=true
+```
+
+Re-enable collection by setting the same value to `false`:
+
+```powershell
+az functionapp config appsettings set `
+  --resource-group $resourceGroup `
+  --name $functionName `
+  --settings AzureWebJobs.collect_compute_capacity.Disabled=false
+```
+
+The collector can also be disabled from **Function App > Functions >
+collect_compute_capacity > Disable** in the Azure portal. To stop or restart
+the entire Function App instead, run:
+
+```powershell
+az functionapp stop --resource-group $resourceGroup --name $functionName
+az functionapp start --resource-group $resourceGroup --name $functionName
+```
+
 ## Scope and interpretation
 
 - A compute SKU is an Azure VM size deployed as a standalone VM or in a uniform
