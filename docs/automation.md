@@ -5,6 +5,13 @@ Its timer trigger runs daily at `00:00 UTC`, uses a user-assigned managed
 identity, and coordinates subscription partitions through Azure Durable Task
 Scheduler.
 
+The Terraform deployment also offers a VM host for customers that cannot use
+Functions or Logic Apps. It runs the shared inventory module from a hardened
+systemd oneshot service and daily timer, with the same user-assigned identity,
+staging container, retry count, concurrency limit, ingestion streams, and
+completed-run manifest contract. This VM option is not part of the `azd`
+deployment.
+
 ## Execution flow
 
 1. The timer trigger starts a durable orchestration.

@@ -114,6 +114,74 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
+        "query": "advisorresources\n| where type =~ 'microsoft.advisor/recommendations'\n| extend AdvisorProperties=parse_json(properties)\n| extend Category=tostring(AdvisorProperties.category),\n         RecommendationSubcategory=tostring(AdvisorProperties.extendedProperties.recommendationSubCategory),\n         RecommendationStatus=tostring(AdvisorProperties.recommendationStatus),\n         ImpactedField=tolower(tostring(AdvisorProperties.impactedField)),\n         ImpactedResource=coalesce(tostring(AdvisorProperties.resourceMetadata.resourceId), tostring(AdvisorProperties.resourceMetadata.ResourceId)),\n         RetirementDateText=tostring(AdvisorProperties.extendedProperties.retirementDate),\n         RetiringFeature=tostring(AdvisorProperties.extendedProperties.retirementFeatureName),\n         Recommendation=tostring(AdvisorProperties.shortDescription.problem),\n         RecommendedAction=tostring(AdvisorProperties.shortDescription.solution),\n         Impact=tostring(AdvisorProperties.impact),\n         LastUpdated=todatetime(AdvisorProperties.lastUpdated),\n         ExtendedProperties=AdvisorProperties.extendedProperties\n| where isempty(RecommendationStatus) or RecommendationStatus in~ ('New', 'InProgress')\n| where '*' in ({Subscription}) or subscriptionId in ({Subscription})\n| extend ResourceJoinId=tolower(ImpactedResource)\n| where ImpactedField in~ ('microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets')\n    or ResourceJoinId contains '/providers/microsoft.compute/virtualmachines/'\n    or ResourceJoinId contains '/providers/microsoft.compute/virtualmachinescalesets/'\n| extend AdvisorCurrentSku=tostring(coalesce(ExtendedProperties.currentSku, ExtendedProperties.CurrentSku, ExtendedProperties.fromSku, ExtendedProperties.FromSku)),\n         TargetSku=tostring(coalesce(ExtendedProperties.targetSku, ExtendedProperties.TargetSku, ExtendedProperties.toSku, ExtendedProperties.ToSku, ExtendedProperties.recommendedSku, ExtendedProperties.RecommendedSku)),\n         AnnualSavings=todouble(coalesce(ExtendedProperties.annualSavingsAmount, ExtendedProperties.AnnualSavingsAmount)),\n         SavingsCurrency=tostring(coalesce(ExtendedProperties.savingsCurrency, ExtendedProperties.SavingsCurrency))\n| join kind=leftouter (\n    resources\n    | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets')\n    | extend ResourceJoinId=tolower(id), ResourceCurrentSku=iff(type =~ 'microsoft.compute/virtualmachines', tostring(properties.hardwareProfile.vmSize), tostring(sku.name))\n    | project ResourceJoinId, ResourceCurrentSku\n) on ResourceJoinId\n| extend CurrentSku=iff(isempty(AdvisorCurrentSku), ResourceCurrentSku, AdvisorCurrentSku),\n         LifecycleText=strcat(RetiringFeature, ' ', Recommendation, ' ', RecommendedAction),\n         UpgradeText=strcat(Recommendation, ' ', RecommendedAction),\n         RetirementDate=todatetime(RetirementDateText)\n| extend CurrentGeneration=toint(extract(@'(?i)v(\\d+)$', 1, CurrentSku)),\n         TargetGeneration=toint(extract(@'(?i)v(\\d+)$', 1, TargetSku))\n| extend IsSkuLifecycle=Category =~ 'HighAvailability'\n            and RecommendationSubcategory =~ 'ServiceUpgradeAndRetirement'\n            and isnotnull(RetirementDate)\n            and RetirementDate > now()\n            and LifecycleText matches regex @'(?i)(sku|vm size|virtual machine size|series|family)',\n         IsSkuUpgradeCost=Category =~ 'Cost'\n            and isnotempty(TargetSku)\n            and isnotnull(CurrentGeneration)\n            and isnotnull(TargetGeneration)\n            and TargetGeneration > CurrentGeneration\n            and UpgradeText matches regex @'(?i)(upgrad|migrat|moderniz|newer.*(sku|vm size|series)|latest.*(sku|vm size|series))'\n                    and not(UpgradeText matches regex @'(?i)(right.?siz|resiz|shut.?down|underutiliz)')\n| where IsSkuLifecycle or IsSkuUpgradeCost\n| extend RecommendationType=iff(IsSkuLifecycle, 'Upcoming VM SKU retirement', 'VM SKU upgrade cost saving')\n| join kind=leftouter (\n    resourcecontainers\n    | where type =~ 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName=name\n) on subscriptionId\n| project ['Recommendation type']=RecommendationType, Subscription=iff(isempty(SubscriptionName), subscriptionId, SubscriptionName), ['Resource group']=resourceGroup, ['Impacted resource']=ImpactedResource, Impact, ['Current SKU']=CurrentSku, ['Recommended SKU']=TargetSku, Recommendation, ['Recommended action']=RecommendedAction, ['Retiring feature']=RetiringFeature, ['Retirement date']=RetirementDate, ['Annual savings']=AnnualSavings, Currency=SavingsCurrency, Status=RecommendationStatus, ['Last updated']=LastUpdated\n| order by ['Recommendation type'] asc, ['Retirement date'] asc nulls last, ['Annual savings'] desc nulls last, Subscription asc",
+        "size": 0,
+        "title": "Advisor - upcoming VM SKU retirements and SKU upgrade cost recommendations",
+        "noDataMessage": "No upcoming VM SKU retirements or explicit VM SKU upgrade cost recommendations were found for the selected subscriptions.",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "value::all"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "filter": true,
+          "rowLimit": 10000
+        }
+      },
+      "name": "AdvisorServiceUpgradeAndRetirement"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| where tolong(DeployedInstances_d) > 0\n| extend RestrictionDetail=strcat(ComputeSku_s, ': ', coalesce(SkuRestrictions_s, 'Unknown')),\n         ZoneDetail=strcat(ComputeSku_s, ': ', coalesce(AvailabilityZones_s, 'Unknown'))\n| summarize ['Deployed instances']=sum(tolong(DeployedInstances_d)), SkuSizes=make_set(ComputeSku_s, 100), SkuRestrictions=make_set(RestrictionDetail, 100), AvailabilityZones=make_set(ZoneDetail, 100), ['Quota used']=take_any(tolong(QuotaUsageVCpus_d)), ['Quota limit']=take_any(tolong(QuotaLimitVCpus_d)), Generation=max(tolong(SkuGeneration_d)), ['Newest generation']=max(tolong(LatestGeneration_d)), ['Generation gap']=max(tolong(GenerationLag_d)) by Subscription=SubscriptionName_s, Region=Region_s, Family=VmFamily_s\n| extend ['Generation age']=case(isnull(Generation) or isnull(['Newest generation']), 'Not versioned', ['Generation gap'] == 0, 'N', ['Generation gap'] >= 4, 'N-4+', strcat('N-', ['Generation gap'])),\n         ['SKU sizes']=strcat_array(array_sort_asc(SkuSizes), ', '),\n         ['SKU restrictions']=strcat_array(array_sort_asc(SkuRestrictions), '; '),\n         ['Availability zones']=strcat_array(array_sort_asc(AvailabilityZones), '; '),\n                 ['Quota usage']=iff(isnull(['Quota used']) or isnull(['Quota limit']) or ['Quota limit'] <= 0, 'Unavailable', strcat(['Quota used'], ' / ', ['Quota limit'], ' vCPUs (', round(100.0 * todouble(['Quota used']) / ['Quota limit'], 1), '%)'))\n| extend ['SKU family']=iff(['Generation age'] == 'Not versioned', Family, strcat(['Generation age'], ' | ', Family))\n| project Subscription, Region, ['SKU family'], ['SKU sizes'], ['Deployed instances'], ['Quota usage'], ['SKU restrictions'], ['Availability zones'], Generation, ['Newest generation'], ['Generation gap']\n| order by Subscription asc, Region asc, ['Generation gap'] desc, ['SKU family'] asc",
+        "size": 0,
+        "title": "Deployed VM SKU families, quota, restrictions, and zones",
+        "noDataMessage": "No deployed VM SKU families were found for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "SKU family",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": "contains",
+                    "thresholdValue": "N-4+ |",
+                    "representation": "red",
+                    "text": "{0}{1}"
+                  },
+                  {
+                    "operator": "contains",
+                    "thresholdValue": "N-3 |",
+                    "representation": "yellow",
+                    "text": "{0}{1}"
+                  }
+                ]
+              }
+            }
+          ],
+          "filter": true,
+          "rowLimit": 10000
+        }
+      },
+      "name": "DeployedVmSkuFamilies"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
         "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nlet capacity = ComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey;\nlet scoped = capacity\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family});\nlet totalInstances = toscalar(scoped | summarize sum(tolong(DeployedInstances_d)));\nscoped\n| summarize ['VM instances']=sum(tolong(DeployedInstances_d)) by Subscription=SubscriptionName_s, Region=Region_s\n| extend ['Deployment share']=iff(totalInstances > 0, todouble(['VM instances']) / totalInstances, 0.0)\n| order by ['Deployment share'] desc, Subscription asc, Region asc",
         "size": 0,
         "title": "Deployment concentration heat map - percentage of VM instances by subscription and region",
@@ -217,6 +285,291 @@
         }
       },
       "name": "RegionalDetail"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| summarize ['Deployed vCPUs']=sum(tolong(DeployedVCpus_d)), ['Quota limit']=take_any(tolong(QuotaLimitVCpus_d)), ['Quota used']=take_any(tolong(QuotaUsageVCpus_d)), ['Quota available']=take_any(tolong(QuotaAvailableVCpus_d)) by Subscription=SubscriptionName_s, Region=Region_s, Family=VmFamily_s\n| where ['Quota limit'] > 0\n| extend ['Quota utilization']=todouble(['Quota used']) / ['Quota limit']\n| where ['Quota utilization'] >= 0.8\n| project Subscription, Region, Family, ['Quota utilization'], ['Quota used'], ['Quota limit'], ['Quota available'], ['Deployed vCPUs']\n| order by ['Quota utilization'] desc, Subscription asc, Region asc",
+        "size": 0,
+        "title": "Quota exhaustion watchlist - families at or above 80% of regional quota",
+        "noDataMessage": "No VM families are at or above 80% of their regional quota for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Quota utilization",
+              "formatter": 8,
+              "formatOptions": {
+                "min": 0,
+                "max": 1,
+                "palette": "red",
+                "showIcon": false
+              },
+              "numberFormat": {
+                "unit": 0,
+                "options": {
+                  "style": "percent",
+                  "maximumFractionDigits": 1
+                }
+              }
+            }
+          ],
+          "filter": true,
+          "rowLimit": 1000
+        }
+      },
+      "name": "QuotaExhaustionWatchlist"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| summarize ['Deployed vCPUs']=sum(tolong(DeployedVCpus_d)), ['Reserved vCPUs']=take_any(tolong(ReservedVCpus_d)) by Subscription=SubscriptionName_s, Region=Region_s, Family=VmFamily_s\n| where ['Reserved vCPUs'] > 0\n| extend ['Unused reserved vCPUs']=iff(['Reserved vCPUs'] > ['Deployed vCPUs'], ['Reserved vCPUs'] - ['Deployed vCPUs'], 0),\n         ['Reservation coverage']=iff(['Deployed vCPUs'] > 0, todouble(min_of(['Reserved vCPUs'], ['Deployed vCPUs'])) / ['Deployed vCPUs'], real(null)),\n         ['Reservation status']=case(['Reserved vCPUs'] > ['Deployed vCPUs'], 'Underutilized reservation', ['Reserved vCPUs'] < ['Deployed vCPUs'], 'Reservation gap - SLA risk', 'Fully matched')\n| project Subscription, Region, Family, ['Reservation status'], ['Deployed vCPUs'], ['Reserved vCPUs'], ['Unused reserved vCPUs'], ['Reservation coverage']\n| order by ['Unused reserved vCPUs'] desc, Subscription asc, Region asc",
+        "size": 0,
+        "title": "Capacity reservation efficiency - reserved vs. deployed vCPUs",
+        "noDataMessage": "No capacity reservations were found for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Reservation coverage",
+              "formatter": 8,
+              "formatOptions": {
+                "min": 0,
+                "max": 1,
+                "palette": "red",
+                "showIcon": false
+              },
+              "numberFormat": {
+                "unit": 0,
+                "options": {
+                  "style": "percent",
+                  "maximumFractionDigits": 1
+                }
+              }
+            }
+          ],
+          "filter": true,
+          "rowLimit": 1000
+        }
+      },
+      "name": "CapacityReservationEfficiency"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| summarize ['Deployed vCPUs (current)']=sum(tolong(DeployedVCpus_d)), ['Quota limit (current)']=sum(tolong(QuotaLimitVCpus_d))\n| extend ['Quota utilization % (current)']=iff(['Quota limit (current)'] > 0, round(100.0 * todouble(['Deployed vCPUs (current)']) / ['Quota limit (current)'], 1), real(null))",
+        "size": 0,
+        "title": "Current capacity snapshot (most recent collection)",
+        "noDataMessage": "No completed collections were found for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Quota utilization % \\(current\\)",
+              "formatter": 8,
+              "formatOptions": {
+                "min": 0,
+                "max": 100,
+                "palette": "red"
+              }
+            }
+          ]
+        }
+      },
+      "name": "CapacityCurrentSnapshot"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let dailyCollections = ComputeCapacityRuns_CL\n| where Status_s == 'Completed'\n| summarize CompletedAt=max(CompletedAt_t) by CollectionId_s\n| extend Day=bin(CompletedAt, 1d)\n| summarize arg_max(CompletedAt, CollectionId_s) by Day;\nlet daily = ComputeCapacity_CL\n| join kind=inner dailyCollections on CollectionId_s\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by CollectionId_s, DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| summarize ['Deployed vCPUs']=sum(tolong(DeployedVCpus_d)), ['Quota limit']=take_any(tolong(QuotaLimitVCpus_d)) by Day, SubscriptionName_s, Region_s, VmFamily_s;\ndaily\n| summarize ['Deployed vCPUs']=sum(['Deployed vCPUs']), ['Quota limit']=sum(['Quota limit']) by Day\n| project CompletedAt=Day, ['Deployed vCPUs'], ['Quota limit']\n| order by CompletedAt asc",
+        "size": 0,
+        "title": "Deployed vCPU and quota limit trend (last 30 daily collections) - for growth forecasting",
+        "noDataMessage": "No completed collections were found in the retained 30-day history for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "linechart",
+        "chartSettings": {
+          "xAxis": "CompletedAt",
+          "yAxis": [
+            "Deployed vCPUs",
+            "Quota limit"
+          ],
+          "showMetrics": false
+        }
+      },
+      "name": "CapacityTrendVCpus"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let dailyCollections = ComputeCapacityRuns_CL\n| where Status_s == 'Completed'\n| summarize CompletedAt=max(CompletedAt_t) by CollectionId_s\n| extend Day=bin(CompletedAt, 1d)\n| summarize arg_max(CompletedAt, CollectionId_s) by Day;\nlet daily = ComputeCapacity_CL\n| join kind=inner dailyCollections on CollectionId_s\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by CollectionId_s, DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| summarize ['Deployed vCPUs']=sum(tolong(DeployedVCpus_d)), ['Quota limit']=take_any(tolong(QuotaLimitVCpus_d)) by Day, SubscriptionName_s, Region_s, VmFamily_s;\ndaily\n| summarize ['Deployed vCPUs']=sum(['Deployed vCPUs']), ['Quota limit']=sum(['Quota limit']) by Day\n| extend ['Quota utilization %']=iff(['Quota limit'] > 0, round(100.0 * todouble(['Deployed vCPUs']) / ['Quota limit'], 1), real(null))\n| project CompletedAt=Day, ['Quota utilization %']\n| order by CompletedAt asc",
+        "size": 0,
+        "title": "Quota utilization % trend (last 30 daily collections)",
+        "noDataMessage": "No completed collections were found in the retained 30-day history for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "linechart",
+        "chartSettings": {
+          "xAxis": "CompletedAt",
+          "yAxis": [
+            "Quota utilization %"
+          ],
+          "showMetrics": false
+        }
+      },
+      "name": "CapacityTrendQuotaUtilization"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nlet scoped = ComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| where tolong(DeployedInstances_d) > 0\n| extend ['Generation age']=case(isnull(toint(SkuGeneration_d)) or isnull(toint(LatestGeneration_d)), 'Not versioned', tolong(GenerationLag_d) == 0, 'N (current)', tolong(GenerationLag_d) >= 4, 'N-4+', strcat('N-', tolong(GenerationLag_d)));\nlet totals = scoped\n| summarize ['Total vCPUs']=sum(tolong(DeployedVCpus_d)) by Subscription=SubscriptionName_s;\nscoped\n| summarize ['Deployed vCPUs']=sum(tolong(DeployedVCpus_d)) by Subscription=SubscriptionName_s, ['Generation age']\n| join kind=inner totals on Subscription\n| extend ['Share of vCPUs']=iff(['Total vCPUs'] > 0, todouble(['Deployed vCPUs']) / ['Total vCPUs'], 0.0)\n| project Subscription, ['Generation age'], ['Deployed vCPUs'], ['Share of vCPUs'], ['Total vCPUs']\n| order by Subscription asc, ['Generation age'] asc",
+        "size": 0,
+        "title": "Fleet lifecycle health - share of deployed vCPUs by generation age per subscription",
+        "noDataMessage": "No deployed VM SKU families were found for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Share of vCPUs",
+              "formatter": 8,
+              "formatOptions": {
+                "min": 0,
+                "max": 1,
+                "palette": "red",
+                "showIcon": false
+              },
+              "numberFormat": {
+                "unit": 0,
+                "options": {
+                  "style": "percent",
+                  "maximumFractionDigits": 1
+                }
+              }
+            }
+          ],
+          "filter": true,
+          "rowLimit": 1000
+        }
+      },
+      "name": "FleetLifecycleHealth"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "advisorresources\n| where type =~ 'microsoft.advisor/recommendations'\n| extend AdvisorProperties=parse_json(properties)\n| extend Category=tostring(AdvisorProperties.category),\n         RecommendationSubcategory=tostring(AdvisorProperties.extendedProperties.recommendationSubCategory),\n         RecommendationStatus=tostring(AdvisorProperties.recommendationStatus),\n         ImpactedField=tolower(tostring(AdvisorProperties.impactedField)),\n         ImpactedResource=coalesce(tostring(AdvisorProperties.resourceMetadata.resourceId), tostring(AdvisorProperties.resourceMetadata.ResourceId)),\n         RetirementDateText=tostring(AdvisorProperties.extendedProperties.retirementDate),\n         RetiringFeature=tostring(AdvisorProperties.extendedProperties.retirementFeatureName),\n         Recommendation=tostring(AdvisorProperties.shortDescription.problem),\n         RecommendedAction=tostring(AdvisorProperties.shortDescription.solution),\n         ExtendedProperties=AdvisorProperties.extendedProperties\n| where isempty(RecommendationStatus) or RecommendationStatus in~ ('New', 'InProgress')\n| where '*' in ({Subscription}) or subscriptionId in ({Subscription})\n| where ImpactedField in~ ('microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets')\n| extend AdvisorCurrentSku=tostring(coalesce(ExtendedProperties.currentSku, ExtendedProperties.CurrentSku, ExtendedProperties.fromSku, ExtendedProperties.FromSku)),\n         LifecycleText=strcat(RetiringFeature, ' ', Recommendation, ' ', RecommendedAction),\n         RetirementDate=todatetime(RetirementDateText)\n| where Category =~ 'HighAvailability'\n    and RecommendationSubcategory =~ 'ServiceUpgradeAndRetirement'\n    and isnotnull(RetirementDate)\n    and RetirementDate > now()\n    and LifecycleText matches regex @'(?i)(sku|vm size|virtual machine size|series|family)'\n| join kind=leftouter (\n    resourcecontainers\n    | where type =~ 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName=name\n) on subscriptionId\n| summarize ['Impacted resources']=dcount(ImpactedResource), ['Current SKUs']=make_set(AdvisorCurrentSku, 50) by Subscription=iff(isempty(SubscriptionName), subscriptionId, SubscriptionName), ['Retiring feature']=RetiringFeature, ['Retirement date']=RetirementDate\n| extend ['Days until retirement']=datetime_diff('day', ['Retirement date'], now()),\n         ['Current SKUs']=strcat_array(array_sort_asc(['Current SKUs']), ', ')\n| project Subscription, ['Retiring feature'], ['Current SKUs'], ['Impacted resources'], ['Retirement date'], ['Days until retirement']\n| order by ['Retirement date'] asc, Subscription asc",
+        "size": 0,
+        "title": "Upcoming retirement timeline - prioritized by nearest retirement date",
+        "noDataMessage": "No upcoming VM SKU retirements were found for the selected subscriptions.",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "value::all"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Days until retirement",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": "<=",
+                    "thresholdValue": "90",
+                    "representation": "red",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "<=",
+                    "thresholdValue": "180",
+                    "representation": "yellow",
+                    "text": "{0}"
+                  }
+                ]
+              }
+            }
+          ],
+          "filter": true,
+          "rowLimit": 1000
+        }
+      },
+      "name": "RetirementTimeline"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let latestCollection = toscalar(ComputeCapacityRuns_CL | where Status_s == 'Completed' | top 1 by CompletedAt_t desc | project CollectionId_s);\nComputeCapacity_CL\n| where CollectionId_s == latestCollection\n| extend DedupKey=iff(isempty(RecordId_s), strcat(SubscriptionId_s, '|', Region_s, '|', ComputeSku_s), RecordId_s)\n| summarize arg_max(TimeGenerated, *) by DedupKey\n| where '*' in ({Subscription}) or SubscriptionId_s in ({Subscription})\n| where '*' in ({Region}) or Region_s in ({Region})\n| where '*' in ({Family}) or VmFamily_s in ({Family})\n| where tolong(DeployedInstances_d) > 0\n| where isnotempty(SkuRestrictions_s) and SkuRestrictions_s !in ('None', 'Unavailable')\n| project Subscription=SubscriptionName_s, Region=Region_s, Family=VmFamily_s, ['SKU size']=ComputeSku_s, ['Deployed instances']=tolong(DeployedInstances_d), ['Deployed vCPUs']=tolong(DeployedVCpus_d), Restriction=SkuRestrictions_s\n| order by Subscription asc, Region asc, Family asc, ['SKU size'] asc",
+        "size": 0,
+        "title": "Restricted SKUs in use - can't scale out further in this region",
+        "noDataMessage": "No deployed SKUs currently carry a scale-out restriction for the selected filters.",
+        "timeContext": {
+          "durationMs": 2592000000
+        },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "filter": true,
+          "rowLimit": 1000
+        }
+      },
+      "name": "RestrictedSkusInUse"
     }
   ],
   "fallbackResourceIds": [

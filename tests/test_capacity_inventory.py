@@ -6,13 +6,17 @@ import capacity_inventory
 import function_app
 from capacity_inventory import (
     ArmClient,
+    availability_zones,
     build_detail_rows,
     discover_partitions_from_environment,
     ingestion_records,
+    latest_vm_family_generations,
     publish_records,
     query_resource_graph,
     quota_value,
     record_id,
+    sku_restrictions,
+    vm_family_generation,
 )
 
 
@@ -106,7 +110,16 @@ def test_build_detail_rows_joins_deployments_skus_and_quota():
     sku = {
         "name": "Standard_D2s_v3",
         "family": "standardDSv3Family",
+        "resourceType": "virtualMachines",
         "capabilities": [{"name": "vCPUs", "value": "2"}],
+        "locationInfo": [{"location": "eastus", "zones": ["3", "1", "2"]}],
+        "restrictions": [
+            {
+                "type": "Zone",
+                "reasonCode": "NotAvailableForSubscription",
+                "restrictionInfo": {"zones": ["3"]},
+            }
+        ],
     }
     quotas = [
         {
@@ -121,6 +134,35 @@ def test_build_detail_rows_joins_deployments_skus_and_quota():
         }
     ]
 
+    def fetch_skus(_subscription, region):
+        if region == "westus3":
+            return [
+                {
+                    "name": "Standard_D2s_v3",
+                    "family": "standardDSv3Family",
+                    "resourceType": "virtualMachines",
+                    "capabilities": [{"name": "vCPUs", "value": "2"}],
+                    "locationInfo": [
+                        {"location": "westus3", "zones": ["1", "2"]}
+                    ],
+                }
+            ]
+        return [
+            sku,
+            {
+                "name": "Standard_D4s_v3",
+                "family": "standardDSv3Family",
+                "resourceType": "virtualMachines",
+                "capabilities": [{"name": "vCPUs", "value": "4"}],
+            },
+            {
+                "name": "Standard_D2s_v6",
+                "family": "standardDSv6Family",
+                "resourceType": "virtualMachines",
+                "capabilities": [{"name": "vCPUs", "value": "2"}],
+            },
+        ]
+
     rows = build_detail_rows(
         subscriptions,
         deployments,
@@ -133,14 +175,7 @@ def test_build_detail_rows_joins_deployments_skus_and_quota():
             }
         ],
         ["eastus", "westus3"],
-        lambda _subscription, _region: [
-            sku,
-            {
-                "name": "Standard_D4s_v3",
-                "family": "standardDSv3Family",
-                "capabilities": [{"name": "vCPUs", "value": "4"}],
-            },
-        ],
+        fetch_skus,
         lambda _subscription, _region: (quotas, usages),
     )
 
@@ -151,9 +186,95 @@ def test_build_detail_rows_joins_deployments_skus_and_quota():
     assert eastus["ResourceKind"] == "VirtualMachine"
     assert eastus["ReservedInstances"] == 2
     assert eastus["ReservedVCpus"] == 8
+    assert eastus["VmFamilyBase"] == "standardDSFamily"
+    assert eastus["SkuGeneration"] == 3
+    assert eastus["LatestGeneration"] == 6
+    assert eastus["GenerationLag"] == 3
+    assert eastus["SkuRestrictions"] == (
+        "Zone (NotAvailableForSubscription): zones=3"
+    )
+    assert eastus["AvailabilityZones"] == "1, 2, 3"
     assert westus3["DeployedInstances"] == 0
     assert westus3["DeployedVCpus"] == 0
     assert westus3["ReservedVCpus"] == 0
+    assert westus3["SkuRestrictions"] == "None"
+    assert westus3["AvailabilityZones"] == "1, 2"
+
+
+def test_sku_restrictions_formats_location_and_zone_scopes():
+    sku = {
+        "restrictions": [
+            {
+                "type": "Location",
+                "reasonCode": "NotAvailableForSubscription",
+                "values": ["eastus"],
+            },
+            {
+                "type": "Zone",
+                "reasonCode": "QuotaId",
+                "restrictionInfo": {
+                    "locations": ["eastus"],
+                    "zones": ["2", "1"],
+                },
+            },
+        ]
+    }
+
+    assert sku_restrictions(sku) == (
+        "Location (NotAvailableForSubscription): locations=eastus; "
+        "Zone (QuotaId): locations=eastus, zones=1,2"
+    )
+    assert sku_restrictions({}) == "None"
+
+
+def test_availability_zones_uses_matching_region():
+    sku = {
+        "locationInfo": [
+            {"location": "westus3", "zones": ["2", "1"]},
+            {"location": "eastus", "zones": ["3"]},
+        ]
+    }
+
+    assert availability_zones(sku, "westus3") == "1, 2"
+    assert availability_zones(sku, "centralus") == "None"
+
+
+def test_vm_family_generation_parses_versioned_and_legacy_families():
+    assert vm_family_generation("standardDSv5Family") == (
+        "standardDSFamily",
+        5,
+    )
+    assert vm_family_generation("standardA0_A7Family") == (
+        "standardA0_A7Family",
+        None,
+    )
+    assert vm_family_generation(None) == (None, None)
+
+
+def test_latest_vm_family_generations_uses_region_sku_metadata():
+    assert latest_vm_family_generations(
+        [
+            {
+                "family": "standardDSv3Family",
+                "resourceType": "virtualMachines",
+            },
+            {
+                "family": "standardDSv6Family",
+                "resourceType": "virtualMachines",
+            },
+            {
+                "family": "standardDSv7Family",
+                "resourceType": "disks",
+            },
+            {
+                "family": "standardESv5Family",
+                "resourceType": "virtualMachines",
+            },
+        ]
+    ) == {
+        "standarddsfamily": 6,
+        "standardesfamily": 5,
+    }
 
 
 def test_publish_records_batches_at_500():
@@ -182,6 +303,12 @@ def test_ingestion_records_have_deterministic_ids():
             "Region": "eastus",
             "ComputeSku": "Standard_D2s_v3",
             "VmFamily": "standardDSv3Family",
+            "VmFamilyBase": "standardDSFamily",
+            "SkuGeneration": 3,
+            "LatestGeneration": 6,
+            "GenerationLag": 3,
+            "SkuRestrictions": "None",
+            "AvailabilityZones": "1, 2, 3",
             "ResourceKind": "VirtualMachine",
             "ResourceCount": 1,
             "DeployedInstances": 1,
@@ -206,6 +333,8 @@ def test_ingestion_records_have_deterministic_ids():
         "Standard_D2s_v3",
     )
     assert first[0]["PartitionId_s"] == "sub-1"
+    assert first[0]["SkuRestrictions_s"] == "None"
+    assert first[0]["AvailabilityZones_s"] == "1, 2, 3"
 
 
 def test_discovery_stages_one_partition_per_deployed_subscription():

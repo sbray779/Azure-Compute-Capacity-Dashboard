@@ -33,22 +33,89 @@ The Function uses:
 These sources are required because Resource Graph does not expose SKU capability
 metadata or quota limits.
 
+The collector also records the generation encoded in each deployed VM family
+and the newest generation of the same family series returned by the Compute
+Resource SKUs API for that subscription and region. Families without a
+versioned `vN` name remain uncolored.
+
 ## Dashboard views
 
 The Workbook queries the latest completed collection and provides:
 
-1. A subscription/VM-family matrix with deployed vCPUs, quota, and
+1. Active Azure Advisor recommendations limited to:
+   - Reliability **Service Upgrade and Retirement** findings for VM or VMSS
+     SKU, size, series, or family retirement/deprecation with a future
+     retirement date.
+   - Cost findings that explicitly recommend upgrading or migrating to a newer
+     `vN` VM SKU generation. General resize, right-size, and shutdown
+     opportunities are excluded. Advisor-provided annual savings and currency
+     are shown when available.
+2. Deployed VM SKU families by subscription and region. Families three
+   generations behind the newest regional generation (`N-3`) are yellow;
+   families four or more generations behind (`N-4+`) are red. The table also
+   shows VM-family quota usage, Resource SKU API restrictions, and availability
+   zones for each subscription and region.
+3. A subscription/VM-family matrix with deployed vCPUs, quota, and
    available quota for each region.
-2. A subscription-by-region heat map showing each region's percentage of VM
+4. A subscription-by-region heat map showing each region's percentage of VM
    instances in the selected scope across regions containing deployed or
    reserved capacity.
-3. Regional detail with subscription, region, VM family, deployed vCPUs, quota
+5. Regional detail with subscription, region, VM family, deployed vCPUs, quota
    limit, quota usage, available quota, reserved vCPUs, and a red
    family-quota-utilization heat map.
-4. Multi-select subscription, region, and VM-family filters with Select All.
+6. Multi-select subscription, region, and VM-family filters with Select All.
+7. A quota exhaustion watchlist highlighting VM families at or above 80% of
+   their regional quota, prioritized by utilization, so quota-increase
+   requests can be filed before they block a deployment.
+8. A capacity reservation efficiency table comparing reserved vCPUs to
+   deployed vCPUs per family and region, flagging underutilized reservations
+   (cost waste) and reservation gaps (SLA risk).
+9. A current capacity snapshot table (deployed vCPUs, quota limit, and quota
+   utilization % as of the most recent collection only), plus a deployed
+   vCPU/quota-limit trend chart and a separate quota-utilization % trend
+   chart across the retained 30-day collection history, for forecasting when
+   a subscription/family/region combination will exhaust its quota at the
+   current growth rate. Utilization is charted separately because its
+   0-100% scale would otherwise be dwarfed by vCPU counts on a shared axis.
+   The trend charts' built-in metrics/legend summary is turned off
+   (`showMetrics: false`) because Azure Workbooks always sums that summary
+   across the full visible time range rather than showing the latest value,
+   which is misleading for point-in-time gauge metrics like deployed vCPUs;
+   the snapshot table above provides the always-correct current totals
+   instead, and hovering over the trend charts still shows accurate
+   per-day values.
+10. A fleet lifecycle health rollup showing each subscription's share of
+    deployed vCPUs by generation age (current, N-1 through N-4+, and
+    not-versioned), as a single at-a-glance health score instead of the
+    row-level family detail.
+11. An upcoming retirement timeline, separate from the Advisor
+    recommendations table, that aggregates SKU retirement findings by
+    retiring feature and date, showing impacted resource counts and days
+    remaining so migrations can be prioritized by urgency.
+12. A restricted-SKUs-in-use table flagging currently deployed SKUs that also
+    carry a Resource SKU API scale-out restriction in their region, so
+    capacity planning accounts for families that can't grow where they're
+    already running.
 
 Azure enforces Compute quota at VM-family level, so the quota views aggregate
 all deployed SKUs that share a family.
+
+## Deployment options
+
+The primary, recommended path uses the Azure Developer CLI (`azd`) with the
+Bicep templates in `infra/` and is documented below. Two alternatives are
+also provided for teams that can't or don't want to use `azd`, without
+removing or changing the `azd`/Bicep path:
+
+| Deployment type | Guide |
+|---|---|
+| `azd` + Bicep (recommended, default) | This README, below |
+| Plain ARM template (`az deployment`, no `azd`) | [`deploy/arm/README.md`](deploy/arm/README.md) |
+| Terraform: Function App (no `azd`) | [`deploy/terraform/README.md`](deploy/terraform/README.md) |
+
+`deploy/arm/main.json` is compiled directly from the Bicep sources, and
+`deploy/terraform/` is a hand-written Function App alternative kept in sync
+with the shared Bicep resources.
 
 ## Prerequisites
 
@@ -109,6 +176,25 @@ The deployment outputs include the Function name and
 ```powershell
 azd env get-value AZURE_WORKBOOK_PORTAL_URL
 ```
+
+## Update an existing deployment
+
+Select the existing azd environment and run `azd up` from the project root:
+
+```powershell
+azd env select <environment-name>
+azd up
+```
+
+This updates the Log Analytics table and DCR schemas, the Workbook definition,
+and the collector Function code. The Advisor recommendations table is available
+as soon as the Workbook update is deployed.
+
+The VM SKU generation, restriction, and availability-zone columns require a
+new completed inventory collection created by the updated Function. Wait for
+the next daily run at `00:00 UTC` or invoke the `collect_compute_capacity`
+timer function from its Azure portal **Code + Test** page. Existing historical
+records remain queryable but don't contain the newly added fields.
 
 ## Local validation
 

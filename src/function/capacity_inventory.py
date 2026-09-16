@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -26,6 +27,10 @@ PROVIDER_API_VERSION = "2021-04-01"
 SUBSCRIPTION_LOCATIONS_API_VERSION = "2022-12-01"
 QUOTA_API_VERSION = "2025-09-01"
 INGESTION_BATCH_SIZE = 500
+VM_FAMILY_GENERATION_PATTERN = re.compile(
+    r"^(?P<series>.+)v(?P<generation>\d+)Family$",
+    re.IGNORECASE,
+)
 
 SUBSCRIPTION_QUERY = """
 resourcecontainers
@@ -241,6 +246,95 @@ def capability_value(sku: dict[str, Any], name: str) -> str | None:
     return None
 
 
+def availability_zones(sku: dict[str, Any], region: str) -> str:
+    zones = {
+        str(zone)
+        for location in sku.get("locationInfo") or []
+        if str(location.get("location", "")).casefold() == region.casefold()
+        for zone in location.get("zones") or []
+    }
+    return ", ".join(sorted(zones)) if zones else "None"
+
+
+def sku_restrictions(sku: dict[str, Any]) -> str:
+    descriptions: list[str] = []
+    for restriction in sku.get("restrictions") or []:
+        restriction_info = restriction.get("restrictionInfo") or {}
+        locations = sorted(
+            str(value)
+            for value in (
+                restriction_info.get("locations")
+                or (
+                    restriction.get("values")
+                    if restriction.get("type") == "Location"
+                    else []
+                )
+                or []
+            )
+        )
+        zones = sorted(
+            str(value)
+            for value in (
+                restriction_info.get("zones")
+                or (
+                    restriction.get("values")
+                    if restriction.get("type") == "Zone"
+                    else []
+                )
+                or []
+            )
+        )
+        scope = []
+        if locations:
+            scope.append(f"locations={','.join(locations)}")
+        if zones:
+            scope.append(f"zones={','.join(zones)}")
+
+        label = str(restriction.get("type") or "Restriction")
+        reason = restriction.get("reasonCode")
+        if reason:
+            label = f"{label} ({reason})"
+        if scope:
+            label = f"{label}: {', '.join(scope)}"
+        descriptions.append(label)
+
+    return "; ".join(descriptions) if descriptions else "None"
+
+
+def vm_family_generation(family: str | None) -> tuple[str | None, int | None]:
+    if not family:
+        return None, None
+
+    match = VM_FAMILY_GENERATION_PATTERN.fullmatch(family)
+    if not match:
+        return family, None
+
+    return (
+        f"{match.group('series')}Family",
+        int(match.group("generation")),
+    )
+
+
+def latest_vm_family_generations(
+    skus: Iterable[dict[str, Any]],
+) -> dict[str, int]:
+    latest: dict[str, int] = {}
+    for sku in skus:
+        resource_type = sku.get("resourceType")
+        if resource_type and str(resource_type).casefold() != "virtualmachines":
+            continue
+
+        family = str(sku.get("family")) if sku.get("family") else None
+        family_base, generation = vm_family_generation(family)
+        if family_base is None or generation is None:
+            continue
+
+        key = family_base.casefold()
+        latest[key] = max(latest.get(key, generation), generation)
+
+    return latest
+
+
 def quota_resource_name(item: dict[str, Any]) -> str | None:
     name = item.get("name")
     if isinstance(name, str):
@@ -317,11 +411,15 @@ def build_detail_rows(
                 for row in subscription_reservations
             }
         )
-        sku_by_name: dict[str, dict[str, Any]] = {}
+        sku_by_region_name: dict[
+            tuple[str, str],
+            dict[str, Any],
+        ] = {}
         quota_by_region: dict[
             str,
             tuple[list[dict[str, Any]], list[dict[str, Any]]],
         ] = {}
+        latest_generations_by_region: dict[str, dict[str, int]] = {}
 
         for region in metadata_regions:
             logging.info(
@@ -329,13 +427,14 @@ def build_detail_rows(
                 subscription["name"],
                 region,
             )
-            for sku in sku_fetcher(subscription_id, region):
+            regional_skus = sku_fetcher(subscription_id, region)
+            latest_generations_by_region[region] = (
+                latest_vm_family_generations(regional_skus)
+            )
+            for sku in regional_skus:
                 sku_name = sku.get("name")
-                if (
-                    sku_name in referenced_skus
-                    and sku_name not in sku_by_name
-                ):
-                    sku_by_name[sku_name] = sku
+                if sku_name in referenced_skus:
+                    sku_by_region_name[(region, str(sku_name))] = sku
 
             if region in regions:
                 logging.info(
@@ -357,10 +456,18 @@ def build_detail_rows(
                     if str(row.get("location")).lower() == region
                     and row.get("computeSku") == compute_sku
                 ]
-                sku = sku_by_name.get(compute_sku)
+                sku = sku_by_region_name.get((region, compute_sku))
                 vcpu_text = capability_value(sku, "vCPUs") if sku else None
                 vcpus_per_instance = int(vcpu_text) if vcpu_text else None
                 family = str(sku.get("family")) if sku and sku.get("family") else None
+                family_base, generation = vm_family_generation(family)
+                latest_generation = (
+                    latest_generations_by_region.get(region, {}).get(
+                        family_base.casefold()
+                    )
+                    if family_base and generation is not None
+                    else None
+                )
                 quota_limit = (
                     quota_value(quotas, family, "limit") if family else None
                 )
@@ -372,7 +479,10 @@ def build_detail_rows(
                     for row in subscription_reservations
                     if str(row.get("location")).lower() == region
                     and (
-                        sku_by_name.get(str(row.get("computeSku"))) or {}
+                        sku_by_region_name.get(
+                            (region, str(row.get("computeSku")))
+                        )
+                        or {}
                     ).get("family")
                     == family
                 ]
@@ -384,7 +494,10 @@ def build_detail_rows(
                     int(row.get("reservedInstances") or 0)
                     * int(
                         capability_value(
-                            sku_by_name.get(str(row.get("computeSku"))) or {},
+                            sku_by_region_name.get(
+                                (region, str(row.get("computeSku")))
+                            )
+                            or {},
                             "vCPUs",
                         )
                         or 0
@@ -407,6 +520,23 @@ def build_detail_rows(
                         "Region": region,
                         "ComputeSku": compute_sku,
                         "VmFamily": family,
+                        "VmFamilyBase": family_base,
+                        "SkuGeneration": generation,
+                        "LatestGeneration": latest_generation,
+                        "GenerationLag": (
+                            latest_generation - generation
+                            if latest_generation is not None
+                            and generation is not None
+                            else None
+                        ),
+                        "SkuRestrictions": (
+                            sku_restrictions(sku) if sku else "Unavailable"
+                        ),
+                        "AvailabilityZones": (
+                            availability_zones(sku, region)
+                            if sku
+                            else "None"
+                        ),
                         "ResourceKind": ", ".join(
                             sorted(
                                 {
@@ -474,6 +604,12 @@ def ingestion_records(
             "Region_s": row["Region"],
             "ComputeSku_s": row["ComputeSku"],
             "VmFamily_s": row["VmFamily"],
+            "VmFamilyBase_s": row["VmFamilyBase"],
+            "SkuGeneration_d": row["SkuGeneration"],
+            "LatestGeneration_d": row["LatestGeneration"],
+            "GenerationLag_d": row["GenerationLag"],
+            "SkuRestrictions_s": row["SkuRestrictions"],
+            "AvailabilityZones_s": row["AvailabilityZones"],
             "ResourceKind_s": row["ResourceKind"],
             "ResourceCount_d": row["ResourceCount"],
             "DeployedInstances_d": row["DeployedInstances"],

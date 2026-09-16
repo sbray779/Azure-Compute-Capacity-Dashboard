@@ -1,0 +1,7 @@
+environment_name     = "capacity-prod"
+location             = "eastus2"
+management_group_id  = "<management-group-id>"
+
+# Optional: object ID of the person applying this configuration, granted
+# Durable Task Data Contributor on the scheduler for troubleshooting access.
+# principal_id = "<your-object-id>"

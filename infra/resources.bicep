@@ -69,6 +69,30 @@ var tableColumns = [
     type: 'string'
   }
   {
+    name: 'VmFamilyBase_s'
+    type: 'string'
+  }
+  {
+    name: 'SkuGeneration_d'
+    type: 'real'
+  }
+  {
+    name: 'LatestGeneration_d'
+    type: 'real'
+  }
+  {
+    name: 'GenerationLag_d'
+    type: 'real'
+  }
+  {
+    name: 'SkuRestrictions_s'
+    type: 'string'
+  }
+  {
+    name: 'AvailabilityZones_s'
+    type: 'string'
+  }
+  {
     name: 'ResourceKind_s'
     type: 'string'
   }
