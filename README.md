@@ -161,6 +161,12 @@ management-group role assignment. The collector identity receives:
 The deploying user also receives Durable Task Data Contributor on the scheduler
 so its orchestration dashboard can be opened for troubleshooting.
 
+The Function App is integrated with a dedicated `/24` subnet delegated to
+`Microsoft.App/environments`, as required by Flex Consumption. All Function
+outbound traffic uses a NAT Gateway with a static public IP.
+
+The Log Analytics workspace and Data Collection Endpoint allow public network
+access. Workbook viewers need normal Log Analytics RBAC.
 Durable Task Scheduler is not available in East US. When
 `AZURE_LOCATION=eastus`, the template keeps the existing application resources
 in East US and places the scheduler in East US 2.
@@ -171,7 +177,9 @@ remains available to azd and the Flex Consumption runtime. Shared-key access
 and anonymous blob access remain disabled.
 
 The deployment outputs include the Function name and
-`AZURE_WORKBOOK_PORTAL_URL`. Retrieve the Workbook URL after deployment with:
+`AZURE_WORKBOOK_PORTAL_URL`, plus `AZURE_VNET_ID`,
+`AZURE_FUNCTION_NAT_PUBLIC_IP`. Retrieve the Workbook URL after
+deployment with:
 
 ```powershell
 azd env get-value AZURE_WORKBOOK_PORTAL_URL

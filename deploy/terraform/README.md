@@ -2,7 +2,8 @@
 
 This folder is the non-`azd` Terraform deployment. It provisions the Durable
 Functions/Flex Consumption collector and its Log Analytics, Data Collection
-Rule, managed identity, staging storage, and Workbook resources.
+Rule, managed identity, staging storage, Workbook, and outbound networking
+resources.
 
 Most resources use the stable `azurerm` provider. Resource types that
 `azurerm` does not yet expose (Log Analytics custom table schemas, the Data
@@ -73,8 +74,15 @@ Capture the outputs you'll need next:
 
 ```powershell
 $resourceGroup = terraform output -raw resource_group_name
+$functionName = terraform output -raw function_name
 $workbookUrl = terraform output -raw workbook_portal_url
+$functionNatPublicIp = terraform output -raw function_nat_public_ip_address
 ```
+
+The Function App is integrated with a dedicated `/24` subnet delegated to
+`Microsoft.App/environments`. All Function outbound traffic is routed through
+a Standard NAT Gateway and the static public IP returned by
+`function_nat_public_ip_address`.
 
 ## 4. Publish the Function code
 

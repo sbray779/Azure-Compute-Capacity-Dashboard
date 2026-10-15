@@ -6,4 +6,11 @@ output/
 __pycache__/
 .pytest_cache/
 *.pyc
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 /test-scripts/
+/troubleshooting.md

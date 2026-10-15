@@ -15,6 +15,10 @@ var deploymentContainerName = 'app-package-${take(suffix, 12)}'
 var workContainerName = 'capacity-work'
 var schedulerName = 'dts-${prefix}-${suffix}'
 var taskHubName = 'capacity'
+var virtualNetworkName = 'vnet-${prefix}'
+var functionSubnetName = 'snet-function'
+var functionNatPublicIpName = 'pip-${prefix}-function'
+var functionNatGatewayName = 'nat-${prefix}-function'
 var metricsPublisherRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '3913510d-42f4-4e42-8a64-420c390055eb'
@@ -168,7 +172,69 @@ var runTableColumns = [
   }
 ]
 
-resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+resource functionNatPublicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
+  name: functionNatPublicIpName
+  location: location
+  sku: {
+    name: 'Standard'
+    tier: 'Regional'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+    idleTimeoutInMinutes: 10
+  }
+}
+
+resource functionNatGateway 'Microsoft.Network/natGateways@2024-05-01' = {
+  name: functionNatGatewayName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    idleTimeoutInMinutes: 10
+    publicIpAddresses: [
+      {
+        id: functionNatPublicIp.id
+      }
+    ]
+  }
+}
+
+resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+  name: virtualNetworkName
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.42.0.0/16'
+      ]
+    }
+  }
+}
+
+resource functionIntegrationSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+  parent: virtualNetwork
+  name: functionSubnetName
+  properties: {
+    addressPrefix: '10.42.0.0/24'
+    defaultOutboundAccess: false
+    natGateway: {
+      id: functionNatGateway.id
+    }
+    delegations: [
+      {
+        name: 'flex-consumption'
+        properties: {
+          serviceName: 'Microsoft.App/environments'
+        }
+      }
+    ]
+  }
+}
+
+resource workspace 'Microsoft.OperationalInsights/workspaces@2025-07-01' = {
   name: '${prefix}-logs'
   location: location
   properties: {
@@ -223,7 +289,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-resource dataCollectionEndpoint 'Microsoft.Insights/dataCollectionEndpoints@2023-03-11' = {
+resource dataCollectionEndpoint 'Microsoft.Insights/dataCollectionEndpoints@2024-03-11' = {
   name: '${prefix}-dce'
   location: location
   properties: {
@@ -456,6 +522,7 @@ module collectorFunction './app/function.bicep' = {
     deploymentStorageContainerName: deploymentContainerName
     identityId: collectorIdentity.id
     identityClientId: collectorIdentity.properties.clientId
+    virtualNetworkSubnetId: functionIntegrationSubnet.id
     appSettings: {
       TIMER_SCHEDULE: '0 0 0 * * *'
       AZURE_CLIENT_ID: collectorIdentity.properties.clientId
@@ -507,3 +574,5 @@ output collectorIdentityId string = collectorIdentity.id
 output collectorPrincipalId string = collectorIdentity.properties.principalId
 output durableTaskSchedulerName string = durableTaskScheduler.outputs.name
 output workbookId string = workbook.id
+output virtualNetworkId string = virtualNetwork.id
+output functionNatPublicIpAddress string = functionNatPublicIp.properties.ipAddress

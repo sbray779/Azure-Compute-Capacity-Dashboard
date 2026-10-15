@@ -8,6 +8,7 @@ param storageAccountName string
 param deploymentStorageContainerName string
 param identityId string
 param identityClientId string
+param virtualNetworkSubnetId string
 
 var applicationInsightsIdentity = 'ClientId=${identityClientId};Authorization=AAD'
 var baseAppSettings = {
@@ -38,6 +39,8 @@ module functionApp 'br/public:avm/res/web/site:0.15.1' = {
       'azd-service-name': 'collector'
     })
     serverFarmResourceId: appServicePlanId
+    virtualNetworkSubnetId: virtualNetworkSubnetId
+    vnetRouteAllEnabled: true
     managedIdentities: {
       systemAssigned: false
       userAssignedResourceIds: [
@@ -67,7 +70,22 @@ module functionApp 'br/public:avm/res/web/site:0.15.1' = {
     siteConfig: {
       alwaysOn: false
       minTlsVersion: '1.2'
+      cors: {
+        allowedOrigins: [
+          'https://portal.azure.com'
+        ]
+      }
     }
+    basicPublishingCredentialsPolicies: [
+      {
+        name: 'ftp'
+        allow: false
+      }
+      {
+        name: 'scm'
+        allow: false
+      }
+    ]
     appSettingsKeyValuePairs: union(appSettings, baseAppSettings)
   }
 }

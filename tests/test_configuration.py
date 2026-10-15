@@ -107,3 +107,70 @@ def test_host_uses_durable_task_scheduler():
         "type": "azureManaged",
         "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
     }
+
+
+def test_azd_infrastructure_routes_function_through_vnet_nat():
+    resources = (ROOT / "infra" / "resources.bicep").read_text()
+    function = (ROOT / "infra" / "app" / "function.bicep").read_text()
+
+    assert "Microsoft.App/environments" in resources
+    assert "Microsoft.Network/natGateways@2024-05-01" in resources
+    assert "defaultOutboundAccess: false" in resources
+    assert "virtualNetworkSubnetId: functionIntegrationSubnet.id" in resources
+    assert "virtualNetworkSubnetId: virtualNetworkSubnetId" in function
+    assert "vnetRouteAllEnabled: true" in function
+    assert "etworkSecurityPerimeter" not in resources
+    assert "SecuredByPerimeter" not in resources
+
+
+def test_terraform_routes_function_through_vnet_nat():
+    terraform = (ROOT / "deploy" / "terraform" / "main.tf").read_text()
+    outputs = (ROOT / "deploy" / "terraform" / "outputs.tf").read_text()
+
+    assert 'resource "azurerm_public_ip" "function_nat"' in terraform
+    assert 'resource "azurerm_nat_gateway" "function"' in terraform
+    assert (
+        'resource "azurerm_nat_gateway_public_ip_association" "function"'
+        in terraform
+    )
+    assert 'resource "azurerm_virtual_network" "function"' in terraform
+    assert (
+        'resource "azurerm_subnet" "function_integration"' in terraform
+    )
+    assert (
+        'resource "azurerm_subnet_nat_gateway_association" "function"'
+        in terraform
+    )
+    assert 'address_space       = ["10.42.0.0/16"]' in terraform
+    assert 'address_prefixes                = ["10.42.0.0/24"]' in terraform
+    assert 'name = "Microsoft.App/environments"' in terraform
+    assert "default_outbound_access_enabled = false" in terraform
+    assert (
+        "virtual_network_subnet_id = "
+        "azurerm_subnet.function_integration.id"
+        in terraform
+    )
+    assert "vnet_route_all_enabled = true" in terraform
+    assert 'output "virtual_network_id"' in outputs
+    assert 'output "function_nat_public_ip_address"' in outputs
+
+
+def test_function_disables_basic_auth_for_ftp_and_scm():
+    function = (ROOT / "infra" / "app" / "function.bicep").read_text()
+    terraform = (ROOT / "deploy" / "terraform" / "main.tf").read_text()
+    arm = (ROOT / "deploy" / "arm" / "main.json").read_text()
+
+    assert "basicPublishingCredentialsPolicies: [" in function
+    assert function.count("allow: false") >= 2
+    assert "name: 'ftp'" in function
+    assert "name: 'scm'" in function
+
+    assert (
+        'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2024-04-01'
+        in terraform
+    )
+    assert 'toset(["ftp", "scm"])' in terraform
+    assert "allow = false" in terraform
+
+    assert '"name": "ftp",\n                                "allow": false' in arm
+    assert '"name": "scm",\n                                "allow": false' in arm
