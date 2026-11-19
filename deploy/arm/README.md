@@ -8,8 +8,11 @@ resources described in the root [README.md](../../README.md#architecture):
 Log Analytics workspace and custom tables, Data Collection Endpoint/Rule,
 Application Insights, user-assigned managed identity, Durable Task
 Scheduler, Flex Consumption storage account and plan, the Python Function
-App, its VNet and NAT Gateway,
-and the Azure Workbook.
+App, and the Azure Workbook.
+
+On the `no-vnet-integration` branch, the Function uses platform-managed
+outbound networking without a VNet, NAT Gateway, or fixed outbound IP.
+Use this variant for a new deployment; see the root README for migration cautions.
 
 `azd` is not used anywhere in this path. You drive the deployment with the
 Azure CLI (`az`) only.
@@ -80,10 +83,7 @@ $resourceGroup = $outputs.AZURE_RESOURCE_GROUP.value
 $functionName = $outputs.AZURE_FUNCTION_NAME.value
 $collectorPrincipalId = $outputs.AZURE_COLLECTOR_PRINCIPAL_ID.value
 $workbookUrl = $outputs.AZURE_WORKBOOK_PORTAL_URL.value
-$functionNatPublicIp = $outputs.AZURE_FUNCTION_NAT_PUBLIC_IP.value
 ```
-
-The Function App routes outbound traffic through the NAT Gateway.
 
 ## 4. Assign Reader at the management group
 

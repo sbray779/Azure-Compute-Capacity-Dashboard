@@ -8,7 +8,6 @@ param storageAccountName string
 param deploymentStorageContainerName string
 param identityId string
 param identityClientId string
-param virtualNetworkSubnetId string
 
 var applicationInsightsIdentity = 'ClientId=${identityClientId};Authorization=AAD'
 var baseAppSettings = {
@@ -39,8 +38,6 @@ module functionApp 'br/public:avm/res/web/site:0.15.1' = {
       'azd-service-name': 'collector'
     })
     serverFarmResourceId: appServicePlanId
-    virtualNetworkSubnetId: virtualNetworkSubnetId
-    vnetRouteAllEnabled: true
     managedIdentities: {
       systemAssigned: false
       userAssignedResourceIds: [

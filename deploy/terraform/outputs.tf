@@ -33,11 +33,3 @@ output "workbook_id" {
 output "workbook_portal_url" {
   value = "https://portal.azure.com/#@/resource${azapi_resource.workbook.id}/workbook"
 }
-
-output "virtual_network_id" {
-  value = azurerm_virtual_network.function.id
-}
-
-output "function_nat_public_ip_address" {
-  value = azurerm_public_ip.function_nat.ip_address
-}

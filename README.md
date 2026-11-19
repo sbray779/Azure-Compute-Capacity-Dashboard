@@ -4,6 +4,16 @@ Inventory deployed Azure VM families across subscriptions under a management gro
 calculate deployed and reserved vCPUs, compare regional VM-family quota, and
 display the latest completed collection in an Azure Workbook.
 
+This branch, `no-vnet-integration`, uses the Function platform's default
+outbound networking. It does not deploy a VNet, subnet, NAT Gateway, or
+dedicated public IP, and it does not provide a fixed outbound source IP.
+Use `main` for the integrated VNet/NAT deployment.
+
+Use this variant for a new deployment. Switching an existing VNet-integrated
+deployment requires a reviewed migration: incremental ARM/Bicep deployments
+do not automatically delete the old network resources, and Terraform can
+plan their destruction. This branch is not an automatic networking rollback.
+
 ## Architecture
 
 | Resource | Purpose |
@@ -161,9 +171,8 @@ management-group role assignment. The collector identity receives:
 The deploying user also receives Durable Task Data Contributor on the scheduler
 so its orchestration dashboard can be opened for troubleshooting.
 
-The Function App is integrated with a dedicated `/24` subnet delegated to
-`Microsoft.App/environments`, as required by Flex Consumption. All Function
-outbound traffic uses a NAT Gateway with a static public IP.
+The Function App is not VNet-integrated. Outbound connections use the
+platform-managed public networking; no customer-managed NAT Gateway is needed.
 
 The Log Analytics workspace and Data Collection Endpoint allow public network
 access. Workbook viewers need normal Log Analytics RBAC.
@@ -177,9 +186,7 @@ remains available to azd and the Flex Consumption runtime. Shared-key access
 and anonymous blob access remain disabled.
 
 The deployment outputs include the Function name and
-`AZURE_WORKBOOK_PORTAL_URL`, plus `AZURE_VNET_ID`,
-`AZURE_FUNCTION_NAT_PUBLIC_IP`. Retrieve the Workbook URL after
-deployment with:
+`AZURE_WORKBOOK_PORTAL_URL`. Retrieve the Workbook URL after deployment with:
 
 ```powershell
 azd env get-value AZURE_WORKBOOK_PORTAL_URL

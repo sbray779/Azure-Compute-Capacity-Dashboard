@@ -118,63 +118,6 @@ resource "azurerm_resource_group" "capacity" {
   tags     = local.tags
 }
 
-# --- Function outbound networking ---
-
-resource "azurerm_public_ip" "function_nat" {
-  name                    = "pip-${local.prefix}-function"
-  resource_group_name     = azurerm_resource_group.capacity.name
-  location                = var.location
-  allocation_method       = "Static"
-  ip_version              = "IPv4"
-  sku                     = "Standard"
-  sku_tier                = "Regional"
-  idle_timeout_in_minutes = 10
-  tags                    = local.tags
-}
-
-resource "azurerm_nat_gateway" "function" {
-  name                    = "nat-${local.prefix}-function"
-  resource_group_name     = azurerm_resource_group.capacity.name
-  location                = var.location
-  sku_name                = "Standard"
-  idle_timeout_in_minutes = 10
-  tags                    = local.tags
-}
-
-resource "azurerm_nat_gateway_public_ip_association" "function" {
-  nat_gateway_id       = azurerm_nat_gateway.function.id
-  public_ip_address_id = azurerm_public_ip.function_nat.id
-}
-
-resource "azurerm_virtual_network" "function" {
-  name                = "vnet-${local.prefix}"
-  resource_group_name = azurerm_resource_group.capacity.name
-  location            = var.location
-  address_space       = ["10.42.0.0/16"]
-  tags                = local.tags
-}
-
-resource "azurerm_subnet" "function_integration" {
-  name                            = "snet-function"
-  resource_group_name             = azurerm_resource_group.capacity.name
-  virtual_network_name            = azurerm_virtual_network.function.name
-  address_prefixes                = ["10.42.0.0/24"]
-  default_outbound_access_enabled = false
-
-  delegation {
-    name = "flex-consumption"
-
-    service_delegation {
-      name = "Microsoft.App/environments"
-    }
-  }
-}
-
-resource "azurerm_subnet_nat_gateway_association" "function" {
-  subnet_id      = azurerm_subnet.function_integration.id
-  nat_gateway_id = azurerm_nat_gateway.function.id
-}
-
 # --- Log Analytics workspace and custom tables ---
 
 resource "azapi_resource" "workspace" {
@@ -458,11 +401,10 @@ resource "azurerm_service_plan" "function_plan" {
 }
 
 resource "azurerm_function_app_flex_consumption" "collector" {
-  name                      = "func-${local.prefix}-${random_string.suffix.result}"
-  resource_group_name       = azurerm_resource_group.capacity.name
-  location                  = var.location
-  service_plan_id           = azurerm_service_plan.function_plan.id
-  virtual_network_subnet_id = azurerm_subnet.function_integration.id
+  name                = "func-${local.prefix}-${random_string.suffix.result}"
+  resource_group_name = azurerm_resource_group.capacity.name
+  location            = var.location
+  service_plan_id     = azurerm_service_plan.function_plan.id
 
   storage_container_type            = "blobContainer"
   storage_container_endpoint        = "${azurerm_storage_account.function_storage.primary_blob_endpoint}${local.deployment_container_name}"
@@ -479,9 +421,7 @@ resource "azurerm_function_app_flex_consumption" "collector" {
     identity_ids = [azurerm_user_assigned_identity.collector.id]
   }
 
-  site_config {
-    vnet_route_all_enabled = true
-  }
+  site_config {}
 
   app_settings = {
     TIMER_SCHEDULE                           = "0 0 0 * * *"
@@ -516,7 +456,6 @@ resource "azurerm_function_app_flex_consumption" "collector" {
     azurerm_role_assignment.dcr_metrics_publisher,
     azurerm_role_assignment.durable_task_access_collector,
     azurerm_role_assignment.insights_metrics_publisher,
-    azurerm_subnet_nat_gateway_association.function,
   ]
 }
 

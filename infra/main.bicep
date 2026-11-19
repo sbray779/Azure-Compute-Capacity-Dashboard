@@ -47,5 +47,3 @@ output AZURE_DURABLE_TASK_SCHEDULER_LOCATION string = durableTaskSchedulerLocati
 output AZURE_MANAGEMENT_GROUP_ID string = managementGroupId
 output AZURE_WORKBOOK_ID string = resources.outputs.workbookId
 output AZURE_WORKBOOK_PORTAL_URL string = 'https://portal.azure.com/#@/resource${resources.outputs.workbookId}/workbook'
-output AZURE_VNET_ID string = resources.outputs.virtualNetworkId
-output AZURE_FUNCTION_NAT_PUBLIC_IP string = resources.outputs.functionNatPublicIpAddress

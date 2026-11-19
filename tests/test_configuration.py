@@ -109,50 +109,55 @@ def test_host_uses_durable_task_scheduler():
     }
 
 
-def test_azd_infrastructure_routes_function_through_vnet_nat():
+def test_azd_infrastructure_uses_platform_outbound_networking():
     resources = (ROOT / "infra" / "resources.bicep").read_text()
     function = (ROOT / "infra" / "app" / "function.bicep").read_text()
+    outputs = (ROOT / "infra" / "main.bicep").read_text()
 
-    assert "Microsoft.App/environments" in resources
-    assert "Microsoft.Network/natGateways@2024-05-01" in resources
-    assert "defaultOutboundAccess: false" in resources
-    assert "virtualNetworkSubnetId: functionIntegrationSubnet.id" in resources
-    assert "virtualNetworkSubnetId: virtualNetworkSubnetId" in function
-    assert "vnetRouteAllEnabled: true" in function
+    assert "Microsoft.Network/" not in resources
+    assert "virtualNetworkSubnetId" not in resources + function
+    assert "vnetRouteAllEnabled" not in function
+    assert "AZURE_VNET_ID" not in outputs
+    assert "AZURE_FUNCTION_NAT_PUBLIC_IP" not in outputs
     assert "etworkSecurityPerimeter" not in resources
     assert "SecuredByPerimeter" not in resources
 
 
-def test_terraform_routes_function_through_vnet_nat():
+def test_terraform_uses_platform_outbound_networking():
     terraform = (ROOT / "deploy" / "terraform" / "main.tf").read_text()
     outputs = (ROOT / "deploy" / "terraform" / "outputs.tf").read_text()
 
-    assert 'resource "azurerm_public_ip" "function_nat"' in terraform
-    assert 'resource "azurerm_nat_gateway" "function"' in terraform
-    assert (
-        'resource "azurerm_nat_gateway_public_ip_association" "function"'
-        in terraform
+    assert 'resource "azurerm_public_ip"' not in terraform
+    assert 'resource "azurerm_nat_gateway' not in terraform
+    assert 'resource "azurerm_virtual_network"' not in terraform
+    assert 'resource "azurerm_subnet' not in terraform
+    assert "virtual_network_subnet_id" not in terraform
+    assert "vnet_route_all_enabled" not in terraform
+    assert 'output "virtual_network_id"' not in outputs
+    assert 'output "function_nat_public_ip_address"' not in outputs
+
+
+def test_arm_uses_platform_outbound_networking():
+    template = json.loads((ROOT / "deploy" / "arm" / "main.json").read_text())
+    resources = template["resources"][1]["properties"]["template"]["resources"]
+    assert not any(
+        resource["type"].startswith("Microsoft.Network/")
+        for resource in resources
     )
-    assert 'resource "azurerm_virtual_network" "function"' in terraform
-    assert (
-        'resource "azurerm_subnet" "function_integration"' in terraform
+    collector = next(
+        resource for resource in resources
+        if resource["name"] == "collectorFunction"
     )
-    assert (
-        'resource "azurerm_subnet_nat_gateway_association" "function"'
-        in terraform
-    )
-    assert 'address_space       = ["10.42.0.0/16"]' in terraform
-    assert 'address_prefixes                = ["10.42.0.0/24"]' in terraform
-    assert 'name = "Microsoft.App/environments"' in terraform
-    assert "default_outbound_access_enabled = false" in terraform
-    assert (
-        "virtual_network_subnet_id = "
-        "azurerm_subnet.function_integration.id"
-        in terraform
-    )
-    assert "vnet_route_all_enabled = true" in terraform
-    assert 'output "virtual_network_id"' in outputs
-    assert 'output "function_nat_public_ip_address"' in outputs
+    assert "virtualNetworkSubnetId" not in collector["properties"]["parameters"]
+    function = collector["properties"]["template"]["resources"][0]
+    assert "virtualNetworkSubnetId" not in function["properties"]["parameters"]
+    assert "vnetRouteAllEnabled" not in function["properties"]["parameters"]
+    defaults = function["properties"]["template"]["parameters"]
+    assert defaults["virtualNetworkSubnetId"]["nullable"] is True
+    assert defaults["virtualNetworkSubnetId"].get("defaultValue") is None
+    assert defaults["vnetRouteAllEnabled"]["defaultValue"] is False
+    assert "AZURE_VNET_ID" not in template["outputs"]
+    assert "AZURE_FUNCTION_NAT_PUBLIC_IP" not in template["outputs"]
 
 
 def test_function_disables_basic_auth_for_ftp_and_scm():
